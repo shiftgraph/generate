@@ -1,0 +1,4 @@
+node_modules/
+*.tgz
+*.ts
+!core/*.ts

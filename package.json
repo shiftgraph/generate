@@ -1,0 +1,52 @@
+{
+  "name": "@shiftgraph/generate",
+  "version": "0.1.4",
+  "description": "TypeScript and Zod types generated from what an API actually returned, not from what its docs claim. Optionality is earned from observation.",
+  "keywords": [
+    "typescript",
+    "types",
+    "codegen",
+    "zod",
+    "openapi",
+    "mcp",
+    "api",
+    "schema",
+    "contract"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./core/shape.js": "./core/shape.js"
+  },
+  "files": [
+    "index.js",
+    "cli.js",
+    "core/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "bin": {
+    "generate": "cli.js"
+  },
+  "scripts": {
+    "smoke": "node smoke.mjs",
+    "prepublishOnly": "node smoke.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shiftgraph/generate.git"
+  },
+  "homepage": "https://github.com/shiftgraph/generate#readme",
+  "bugs": {
+    "url": "https://github.com/shiftgraph/generate/issues"
+  }
+}
