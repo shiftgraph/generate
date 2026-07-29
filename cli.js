@@ -11,7 +11,7 @@
 // times, profiles each response, folds them, and writes the types.
 import { promises as fs } from 'node:fs';
 import { profileValue, structuralProfile, carryOptionality } from './core/shape.js';
-import { generateModule, countFields } from './index.js';
+import { generateModule, generateFixture, countFields } from './index.js';
 
 const UA = 'shiftgraph-generate/0.1 (+https://www.npmjs.com/package/@shiftgraph/generate)';
 
@@ -180,9 +180,40 @@ async function main() {
   const outPath = flags.out || `${slug(name)}.ts`;
   await fs.writeFile(outPath, module, 'utf8');
   console.log(`Wrote ${outPath}`);
+
+  // THE FIXTURE IS WRITTEN BY DEFAULT, and that is the whole point of it.
+  //
+  // A type lands in the repository and is consulted when the code compiles. A
+  // fixture lands in the TEST SUITE and is consulted on every run, which is far
+  // more often. And a fixture goes stale because time passes rather than
+  // because a provider changed anything, so it is felt weekly rather than
+  // twice a year. That frequency is the reason this capability exists at all.
+  //
+  // Behind a flag it would be a feature nobody discovers, and a tool whose best
+  // idea is opt-in has not shipped it. `--no-fixture` opts out.
+  if (!flags['no-fixture']) {
+    const fixturePath = `${outPath.replace(/\.ts$/, '')}.fixture.ts`;
+    const typeModule = `./${outPath.split(/[\\/]/).pop().replace(/\.ts$/, '')}`;
+    await fs.writeFile(
+      fixturePath,
+      generateFixture({
+        name,
+        profile,
+        source,
+        observations: bodies.length,
+        observedFrom: today,
+        observedTo: today,
+        command: `npx @shiftgraph/generate ${flags.stdin ? '--stdin' : positional[0]}`,
+        typeModule,
+      }),
+      'utf8',
+    );
+    console.log(`Wrote ${fixturePath}`);
+  }
+
   console.log(`  ${counts.total} fields, ${counts.optional} optional, from ${bodies.length} observation${bodies.length === 1 ? '' : 's'}`);
   if (bodies.length < 3) console.log(`  more observations narrow it further: --samples 5`);
-  console.log(`  print instead of writing: --stdout`);
+  console.log(`  types only: --no-fixture   print instead of writing: --stdout`);
 }
 
 main().catch((err) => {

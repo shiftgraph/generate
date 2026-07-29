@@ -1,3 +1,10 @@
+> **Canonical source.** This package is developed in
+> [shiftgraph/observatory](https://github.com/shiftgraph/observatory) under
+> `packages/generate`, which is where the record it reads is produced and where
+> its published metadata points. This mirror exists because the package was
+> first released from here; it had drifted to source for a version npm never
+> published, which is the opposite of useful, so it now tracks what ships.
+
 # @shiftgraph/generate
 
 **Your types describe what the docs promise. This generates types from what the API actually returned.**
@@ -7,6 +14,37 @@ npx @shiftgraph/generate https://api.github.com/repos/facebook/react
 ```
 
 No install, no signup, no config. It requests the URL a few times, profiles each response, and writes a `.ts` file containing TypeScript types and a Zod schema — an artifact you commit, not output you read once.
+
+
+## What it writes
+
+Two files, from one command:
+
+```bash
+npx @shiftgraph/generate https://api.github.com/repos/facebook/react
+```
+
+```
+Wrote github-com-repos-facebook-react.ts
+Wrote github-com-repos-facebook-react.fixture.ts
+```
+
+The **type** is consulted when your code compiles. The **fixture** is consulted
+on every test run, which is far more often, and it is the one that goes stale
+because time passes rather than because a provider changed anything.
+
+The fixture is typed against the declaration beside it, so a regenerated type
+that no longer matches is a compile error rather than a test that quietly keeps
+passing. Its values are placeholders, because the record holds no values: a
+fixture built from a captured response embeds whatever happened to be in it,
+and a test asserting against that is asserting against one response rather than
+against the contract.
+
+Optional fields are present in the fixture. It is the shape your code must
+handle, and a fixture missing the optional half lets a test pass against a
+response the interface is entitled to send.
+
+`--no-fixture` writes the type alone.
 
 ## Why the types differ from a spec generator's
 

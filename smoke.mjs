@@ -75,7 +75,10 @@ try {
   const installed = path.join(dir, 'node_modules', '@shiftgraph', 'generate', 'cli.js');
   check('it runs against a live URL and writes a file', () => {
     node([installed, 'https://api.github.com/repos/octocat/Hello-World', '--samples', '1'], dir);
-    const written = readdirSync(dir).filter((f) => f.endsWith('.ts'));
+    // BOTH files end in .ts now, so the type has to be selected rather than
+    // taken as "the first .ts". Selecting blind is how this assertion started
+    // running against the fixture.
+    const written = readdirSync(dir).filter((f) => f.endsWith('.ts') && !f.endsWith('.fixture.ts'));
     if (!written.length) throw new Error('no .ts file written: the tool printed and left nothing behind');
     const src = readFileSync(path.join(dir, written[0]), 'utf8');
     if (!src.includes('export interface')) throw new Error('output has no interface');
@@ -85,8 +88,18 @@ try {
 
   // 5. Honesty checks: the limits a reader is entitled to see must be present.
   check('the honest-limits notes survive into the output', () => {
-    const written = readdirSync(dir).filter((f) => f.endsWith('.ts'));
+    const written = readdirSync(dir).filter((f) => f.endsWith('.ts') && !f.endsWith('.fixture.ts'));
     const src = readFileSync(path.join(dir, written[0]), 'utf8');
+    // The fixture is written by default now, and it is the artifact that lands
+    // in the test suite. A publish that emits only the type has shipped half
+    // the capability, and nothing else would notice.
+    const fixtures = readdirSync(dir).filter((f) => f.endsWith('.fixture.ts'));
+    if (!fixtures.length) throw new Error('no .fixture.ts written: the fixture is meant to be default');
+    const fx = readFileSync(path.join(dir, fixtures[0]), 'utf8');
+    if (!fx.includes('import type {')) throw new Error('fixture does not import its type');
+    if (!fx.includes('Fixture:')) throw new Error('fixture value is not annotated against the type');
+    if (!fx.includes('Values are placeholders')) throw new Error('fixture omits the placeholder note');
+
     if (!src.includes('prefer theirs')) throw new Error('missing the official-SDK limit');
     if (!src.includes('ONE resource')) throw new Error('missing the resource-conditioning warning');
   });
@@ -104,6 +117,39 @@ try {
     const meta = JSON.parse(readFileSync(path.join(dir, 'node_modules', '@shiftgraph', 'generate', 'package.json'), 'utf8'));
     const deps = Object.keys(meta.dependencies || {});
     if (deps.length) throw new Error(`has dependencies: ${deps.join(', ')}`);
+  });
+
+  // 0.2.0 shipped with none of this. The npm page for the package the Show HN
+  // post is about had NO source link at all, `types` pointed at a file `files`
+  // excluded, and the manifest claimed MIT while shipping no licence text. It
+  // was a regression, not an oversight: the standalone repo's manifest had all
+  // of it and the copy that actually publishes did not. `core/*` never drifted
+  // because a test byte-locks it; the manifest had no such guard, so this is
+  // that guard.
+  check('a stranger can find the source, the licence and the types', () => {
+    const root = path.join(dir, 'node_modules', '@shiftgraph', 'generate');
+    const meta = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+    for (const field of ['repository', 'homepage', 'bugs']) {
+      if (!meta[field]) throw new Error(`published metadata has no ${field}: the npm page links nowhere`);
+    }
+    const url = meta.repository.url || '';
+    if (!url.includes('github.com/shiftgraph/observatory')) {
+      throw new Error(`repository points at ${url}; the other two packages point at a repo that 404s`);
+    }
+    if (!existsSync(path.join(root, 'LICENSE'))) throw new Error('manifest says MIT and ships no licence text');
+    if (meta.types && !existsSync(path.join(root, meta.types))) {
+      throw new Error(`types is ${meta.types} and it is not in the tarball`);
+    }
+  });
+
+  check('every export is declared, including the ones added last', () => {
+    const root = path.join(dir, 'node_modules', '@shiftgraph', 'generate');
+    const js = readFileSync(path.join(root, 'index.js'), 'utf8');
+    const dts = readFileSync(path.join(root, 'index.d.ts'), 'utf8');
+    const exported = [...js.matchAll(/^export function (\w+)/gm)].map((m) => m[1]);
+    const declared = [...dts.matchAll(/^export function (\w+)/gm)].map((m) => m[1]);
+    const missing = exported.filter((e) => !declared.includes(e));
+    if (missing.length) throw new Error(`undeclared for TypeScript consumers: ${missing.join(', ')}`);
   });
 } finally {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* windows file locks */ }
