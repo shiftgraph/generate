@@ -216,7 +216,40 @@ async function main() {
   console.log(`  types only: --no-fixture   print instead of writing: --stdout`);
 }
 
+/**
+ * The failure path used to be `console.error(err.message)` and nothing else, so
+ * a first run from a directory the shell happened to be sitting in produced:
+ *
+ *   generate: EPERM: operation not permitted, open 'C:\Windows\System32\...'
+ *
+ * The tool had worked. It fetched, it profiled, it produced a type, and then it
+ * could not write to a protected directory. But a raw Node errno reads as "this
+ * is broken" rather than "you are in the wrong folder", and it arrives at the
+ * single worst moment: the first thirty seconds of the first thing anyone tries,
+ * with no account and no prior investment to spend on believing us.
+ *
+ * A write failure is the ONE error this tool can hit through no fault of the URL
+ * it was given, so it is the one worth naming precisely.
+ */
+const WRITE_FAILURE = {
+  EPERM: 'this directory does not allow writes',
+  EACCES: 'you do not have permission to write here',
+  EROFS: 'this filesystem is read only',
+  ENOSPC: 'the disk is full',
+};
+
 main().catch((err) => {
-  console.error(`generate: ${err.message}`);
+  const why = WRITE_FAILURE[err.code];
+  if (why) {
+    // Recover the directory from the path Node reported, so the message names
+    // where it actually tried rather than where we assume it was.
+    const dir = err.path ? err.path.replace(/[\\/][^\\/]*$/, '') : process.cwd();
+    console.error(`generate: ${why}.`);
+    console.error(`  tried to write into ${dir}`);
+    console.error(`  cd into your project and run it again, or choose a path with --out`);
+    console.error(`  to see the types without writing anything: --stdout`);
+  } else {
+    console.error(`generate: ${err.message}`);
+  }
   process.exitCode = 1;
 });
