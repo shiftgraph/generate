@@ -33,8 +33,32 @@ const PKG_DIR = path.dirname(fileURLToPath(import.meta.url));
 // shell is exactly what the DEP0190 warning objects to. Paths are quoted
 // because this repository lives under a directory with a space in its name,
 // which is how the first version of this failed.
+/**
+ * The environment is scrubbed of npm's own dry-run flag before shelling out,
+ * and that is not defensive tidying: without it this gate fails on the exact
+ * command a careful person runs first.
+ *
+ * `npm publish --dry-run` sets `npm_config_dry_run=true` in the environment.
+ * That triggers `prepublishOnly`, which runs this file, which shells out to
+ * `npm pack` -- and the nested pack INHERITS the flag. So it prints the name of
+ * the tarball it would have written and writes nothing, and the check below
+ * correctly reports no tarball at that path. The package is fine; the harness
+ * was reporting on a pack that was never asked to happen.
+ *
+ * A pre-publish gate that fails under the standard pre-publish rehearsal is
+ * worse than no gate: it teaches whoever hits it that the check is unreliable,
+ * and the next person skips it on the run that mattered.
+ */
+const CLEAN_ENV = { ...process.env };
+delete CLEAN_ENV.npm_config_dry_run;
+
 const npm = (args, cwd) =>
-  execSync(`npm ${args.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ')}`, { cwd, encoding: 'utf8', stdio: 'pipe' });
+  execSync(`npm ${args.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ')}`, {
+    cwd,
+    encoding: 'utf8',
+    stdio: 'pipe',
+    env: CLEAN_ENV,
+  });
 const node = (args, cwd, input) => execFileSync(process.execPath, args, { cwd, encoding: 'utf8', stdio: 'pipe', input });
 
 let failures = 0;
