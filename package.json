@@ -1,6 +1,6 @@
 {
   "name": "@shiftgraph/generate",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "TypeScript types AND test fixtures from what an API was actually observed to return. Optionality earned, not assumed. Zero dependencies.",
   "keywords": [
     "typescript",
