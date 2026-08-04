@@ -65,8 +65,30 @@ export function profileValue(value, options = {}, depth = 0) {
     // homogeneity alone is not enough and both conditions must hold.
     const names = Object.keys(profiled);
     if (names.length >= 2) {
-      const shapes = names.map(n => JSON.stringify(structuralProfile(profiled[n])));
-      const homogeneous = shapes.every(s => s === shapes[0]);
+      // A REDACTED SIBLING IS A WILDCARD, NOT A SHAPE.
+      //
+      // `redacted-secret` says we refused to look, so it is evidence about our
+      // own regex and none whatsoever about the value's structure. Counting it
+      // as a distinct shape lets one redaction veto map detection for the whole
+      // object, and `mergeProfiles` already refuses to let a no-information
+      // sibling destroy real structure for exactly this reason.
+      //
+      // Observed live. `api.coinbase.com /v2/exchange-rates` returns 637 rates
+      // keyed by currency code, and one of those currencies has the ticker
+      // COOKIE, which `isSecretKey` matches. That single sibling profiled as
+      // `redacted-secret`, homogeneity failed, map detection did not fire, all
+      // 637 tickers became contract fields, and every listing or delisting
+      // published a false `dominant_response_shape_changed` against Coinbase.
+      // GRVT being listed on 2026-07-30 is the one in the public ledger.
+      //
+      // Two correct rules combining into a false claim about a named third
+      // party. Neither rule is wrong alone; the intersection had no owner.
+      const informative = names.filter(n => profiled[n]?.type !== 'redacted-secret');
+      const shapes = informative.map(n => JSON.stringify(structuralProfile(profiled[n])));
+      // Still needs two real siblings to compare. An object of one value plus
+      // one redaction tells us nothing, and inferring a map from it would be
+      // guessing from n=1 - the defect this file already carries warnings about.
+      const homogeneous = informative.length >= 2 && shapes.every(s => s === shapes[0]);
       // A purely numeric key is the deliberately-undecided case ({"200": n,
       // "404": n} is a status histogram, which is contract vocabulary), so it
       // does not count as evidence of a map. Caught by the record guards on the
@@ -75,7 +97,10 @@ export function profileValue(value, options = {}, depth = 0) {
         n => !/^[A-Za-z_$][A-Za-z0-9_$-]*$/.test(n) && !/^\d+$/.test(n),
       );
       if (homogeneous && unfieldlike) {
-        return { type: 'object', keys: { '{key}': profiled[names[0]] }, key_count: keys.length, depth, map: true };
+        // The representative must be one of the informative siblings. Taking
+        // names[0] would emit `{key}: redacted-secret` whenever the redacted
+        // key sorted first, which would make the whole map look like a secret.
+        return { type: 'object', keys: { '{key}': profiled[informative[0]] }, key_count: keys.length, depth, map: true };
       }
     }
     // key_count stays the count of keys the response actually carried, not the
@@ -382,7 +407,33 @@ function diffNormalized(before, after, basePath) {
     // uncertainty as the provider's change.
     if (('{key}' in bk) !== ('{key}' in ak)) return diffs;
     for (const k of [...new Set([...Object.keys(bk), ...Object.keys(ak)])].sort()) {
-      if (!(k in bk)) { if (isEmptinessVolatile(ak[k])) continue; diffs.push({ type: 'field_added', path: `${basePath}.${k}`, after: ak[k]?.type, breaking: false }); }
+      if (!(k in bk)) {
+        if (isEmptinessVolatile(ak[k])) continue;
+        // APPEARING OPTIONAL IS SAMPLING, NOT ADDITION. The mirror of the
+        // known-optional rule twelve lines below, which was here on its own and
+        // made the two directions disagree.
+        //
+        // `optional` on the CURRENT side can only have come from
+        // `mergeProfiles`: at least one sibling in this very response lacked the
+        // key. That is a statement about the records this response happened to
+        // carry, not about the interface starting to return something. The
+        // baseline side is the one that accumulates series evidence, so the
+        // asymmetry is real and this flag is unambiguous here.
+        //
+        // Observed live. `api.artic.edu /api/v1/artworks` returns a page of two
+        // artworks. On 2026-08-04T01:26Z one of the two carried
+        // `suggest_autocomplete_boosted` and the other did not - one record, in
+        // one sweep out of nine, never before and never since. The union over
+        // the sample grew from 98 fields to 99, and a false
+        // `dominant_response_shape_changed` went into the public ledger against
+        // a museum. Any paginated collection of heterogeneous records does this
+        // on any sweep where the page turns.
+        //
+        // A field genuinely added and present in EVERY sampled record carries no
+        // `optional` flag and is still reported.
+        if (ak[k]?.optional) continue;
+        diffs.push({ type: 'field_added', path: `${basePath}.${k}`, after: ak[k]?.type, breaking: false });
+      }
       else if (!(k in ak)) {
         if (isEmptinessVolatile(bk[k])) continue;
         // Already known optional: we watched the interface omit it before, so
