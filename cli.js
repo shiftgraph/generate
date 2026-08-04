@@ -15,15 +15,41 @@ import { generateModule, generateFixture, countFields } from './index.js';
 
 const UA = 'shiftgraph-generate/0.1 (+https://www.npmjs.com/package/@shiftgraph/generate)';
 
+/**
+ * A flag that takes no value. Naming them is the whole fix.
+ *
+ * The catch-all branch below treats every unknown `--flag` as taking the next
+ * argument, so `--no-fixture` - which takes none - swallowed whatever followed
+ * it. Two consequences, both silent and both in the documented usage line
+ * `types only: --no-fixture   print instead of writing: --stdout`:
+ *
+ *   --no-fixture --stdout   set flags['no-fixture'] = '--stdout', so --stdout
+ *                           vanished and the tool wrote files while the caller
+ *                           asked it to print.
+ *   --no-fixture  (last)    set flags['no-fixture'] = undefined, which is
+ *                           falsy, so the fixture was written anyway. The
+ *                           documented flag did nothing at all.
+ */
+const BOOLEAN_FLAGS = new Set(['stdin', 'stdout', 'no-fixture']);
+
 function parseArgs(argv) {
   const positional = [];
   const flags = { also: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--also') flags.also.push(argv[++i]);
-    else if (a === '--stdin') flags.stdin = true;
-    else if (a === '--stdout') flags.stdout = true;
-    else if (a.startsWith('--')) flags[a.slice(2)] = argv[++i];
+    else if (a.startsWith('--')) {
+      const key = a.slice(2);
+      if (BOOLEAN_FLAGS.has(key)) { flags[key] = true; continue; }
+      const value = argv[i + 1];
+      // A value flag followed by another flag, or by nothing, is a typo the
+      // caller wants named rather than absorbed.
+      if (value === undefined || value.startsWith('--')) {
+        throw new Error(`${a} expects a value. Got ${value === undefined ? 'nothing' : value}.`);
+      }
+      flags[key] = value;
+      i++;
+    }
     else positional.push(a);
   }
   return { positional, flags };
@@ -57,20 +83,63 @@ function decodeEmbeddedJson(body) {
   return decoded ? { ...body, content } : body;
 }
 
+/**
+ * Observe one URL `samples` times and return only the bodies that are contract.
+ *
+ * A NON-2xx BODY IS NEVER MERGED, AT ANY SAMPLE INDEX.
+ *
+ * The guard used to read `if (!res.ok && bodies.length === 0)`, so it only
+ * covered the FIRST response. From sample two onward a non-2xx with a JSON body
+ * went straight into the profile. Reproduced against a server answering 200 then
+ * a GitHub-shaped 403: five real fields became seven, `message` and
+ * `documentation_url` joined the customer's contract, and - worse - every real
+ * field was marked optional, because the error response omitted them. Exit 0, no
+ * warning, and the generated header arguing against itself: "a type generated
+ * from a specification would mark nearly all of these optional, which is why one
+ * of those is useful at a call site and the other is not."
+ *
+ * This is the observatory's rate-limit incident in the flagship free artefact.
+ * That one was fixed at `normalizeObservation`, the single choke point every
+ * adapter passes through; this loop is a second reader that never received the
+ * rule. Unauthenticated GitHub allows 60 requests an hour and every URL costs
+ * `samples` of them, so a rate limit mid-run is the ordinary case rather than
+ * the edge - and a rate limit answers 403 with valid JSON, which is exactly the
+ * shape that walked through.
+ *
+ * SKIPPED RATHER THAN FATAL, once at least one good sample exists. Aborting the
+ * whole run would throw away responses the caller already spent their rate
+ * budget on, precisely when they cannot easily retry. The skips are counted,
+ * reported to the caller, and carried into the generated file's own notes,
+ * because that file is read later by someone who was not here.
+ */
 async function observe(url, samples, delayMs) {
   const bodies = [];
+  const skipped = [];
+  let answeredBy = null;
   for (let i = 0; i < samples; i++) {
     const res = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json, */*' } });
     const text = await res.text();
-    if (!res.ok && bodies.length === 0) {
-      throw new Error(`${url} returned ${res.status}. Types from an error response would describe the error, not the contract.`);
+    // The URL that ANSWERED, which is not the URL asked for when a redirect was
+    // followed. `api.github.com/repos/facebook/react` answers 301 to
+    // `/repositories/10270250`, and the provenance block claimed the former.
+    answeredBy ||= res.url || null;
+    if (!res.ok) {
+      if (bodies.length === 0 && i === samples - 1) {
+        throw new Error(`${url} returned ${res.status}. Types from an error response would describe the error, not the contract.`);
+      }
+      skipped.push(res.status);
+      if (i < samples - 1) await new Promise((r) => setTimeout(r, delayMs));
+      continue;
     }
     try { bodies.push(decodeEmbeddedJson(JSON.parse(text))); } catch {
       throw new Error(`${url} did not return JSON (content-type ${res.headers.get('content-type') || 'unknown'}).`);
     }
     if (i < samples - 1) await new Promise((r) => setTimeout(r, delayMs));
   }
-  return bodies;
+  if (bodies.length === 0) {
+    throw new Error(`${url} returned ${skipped.join(', ')} on every attempt. Types from an error response would describe the error, not the contract.`);
+  }
+  return { bodies, skipped, answeredBy };
 }
 
 /** A filename someone would not be annoyed to find in their working directory. */
@@ -96,6 +165,8 @@ async function main() {
   let bodies = [];
   let name = flags.name;
   let source;
+  /** Non-2xx responses that were refused rather than merged. Reported, never silent. */
+  const skipped = [];
 
   if (flags.stdin) {
     const raw = await readStdin();
@@ -122,9 +193,18 @@ async function main() {
       return;
     }
     const urls = [url, ...flags.also];
-    for (const u of urls) bodies.push(...(await observe(u, samples, delayMs)));
+    const resolved = [];
+    for (const u of urls) {
+      const seen = await observe(u, samples, delayMs);
+      bodies.push(...seen.bodies);
+      if (seen.skipped.length) skipped.push({ url: u, statuses: seen.skipped });
+      // Name the URL that ANSWERED. Every other line in the provenance block is
+      // exact; this was the one that could be false, and it was false on every
+      // redirect. `res.url` was already in scope.
+      resolved.push(seen.answeredBy && seen.answeredBy !== u ? `${u} -> ${seen.answeredBy}` : u);
+    }
     name ||= nameFromUrl(url);
-    source = urls.join(', ');
+    source = resolved.join(', ');
   }
 
   let profile = structuralProfile(profileValue(bodies[0]));
@@ -133,6 +213,13 @@ async function main() {
   }
 
   const notes = [];
+  // The refusal travels INTO the file, not just across the terminal. Whoever
+  // reads this type later was not here when it ran, and "generated from fewer
+  // observations than asked for, because the API was rate-limiting us" is
+  // exactly the kind of thing they need in order to trust the optionality.
+  for (const s of skipped) {
+    notes.push(`${s.statuses.length} of ${samples} responses from ${s.url} returned ${[...new Set(s.statuses)].join('/')} and were REFUSED, not merged. Types from an error response would describe the error, not the contract. Optionality below is therefore based on ${bodies.length} observation${bodies.length === 1 ? '' : 's'}.`);
+  }
   if (bodies.length < 3) {
     notes.push(`only ${bodies.length} observation${bodies.length === 1 ? '' : 's'}: a field that IS conditional may be typed required here. Raise --samples, or fold another resource with --also.`);
   }
@@ -212,6 +299,9 @@ async function main() {
   }
 
   console.log(`  ${counts.total} fields, ${counts.optional} optional, from ${bodies.length} observation${bodies.length === 1 ? '' : 's'}`);
+  for (const s of skipped) {
+    console.log(`  refused ${s.statuses.length} non-2xx response${s.statuses.length === 1 ? '' : 's'} from ${s.url} (${[...new Set(s.statuses)].join(', ')}) rather than typing the error`);
+  }
   if (bodies.length < 3) console.log(`  more observations narrow it further: --samples 5`);
   console.log(`  types only: --no-fixture   print instead of writing: --stdout`);
 }

@@ -20,7 +20,7 @@
 // npm's own normalisation actually produce.
 //
 //   node packages/generate/smoke.mjs
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync, execSync, spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -163,6 +163,42 @@ try {
     if (!existsSync(path.join(root, 'LICENSE'))) throw new Error('manifest says MIT and ships no licence text');
     if (meta.types && !existsSync(path.join(root, meta.types))) {
       throw new Error(`types is ${meta.types} and it is not in the tarball`);
+    }
+  });
+
+  // A non-2xx AFTER the first sample must never reach the profile.
+  //
+  // This gate ran green while the bug shipped: every check above is a happy
+  // path, and the defect only appears on sample two. `if (!res.ok &&
+  // bodies.length === 0)` guarded the first response only, so a rate-limit 403
+  // with a JSON body merged straight in - five real fields became seven, and
+  // every real field turned optional because the error omitted it. Exit 0, no
+  // warning. Unauthenticated GitHub allows 60 requests an hour, so this is the
+  // ordinary case rather than the edge.
+  check('a non-2xx mid-run is refused, not merged into the contract', () => {
+    const server = `import http from 'node:http';
+let n = 0;
+http.createServer((q, r) => {
+  n++;
+  r.setHeader('content-type', 'application/json');
+  if (n === 1) r.writeHead(200).end(JSON.stringify({ id: 'a', amount: 1, currency: 'usd' }));
+  else r.writeHead(403).end(JSON.stringify({ message: 'rate limited', documentation_url: 'x' }));
+}).listen(45991, () => console.log('ready'));`;
+    const srv = path.join(dir, 'smoke-server.mjs');
+    writeFileSync(srv, server);
+    const proc = spawn(process.execPath, [srv], { stdio: 'ignore', detached: false });
+    try {
+      execSync(process.platform === 'win32' ? 'powershell -c "Start-Sleep -Milliseconds 900"' : 'sleep 1', { stdio: 'ignore' });
+      const out = node([installed, 'http://localhost:45991/x', '--samples', '2', '--no-fixture', '--stdout'], dir);
+      if (/message\??:/.test(out) || /documentation_url/.test(out)) {
+        throw new Error('an error-response field reached the generated type');
+      }
+      if (/amount\?:/.test(out)) {
+        throw new Error('a real field was marked optional because an error response omitted it');
+      }
+      if (!/amount: number/.test(out)) throw new Error('the good sample did not survive');
+    } finally {
+      proc.kill();
     }
   });
 
